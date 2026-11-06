@@ -1,6 +1,17 @@
-@TaskManager.Api_HostAddress = http://localhost:5247
+### Refresh request A
+POST https://localhost:7092/api/Authentication/refresh-token
+Content-Type: application/json
 
-GET {{TaskManager.Api_HostAddress}}/weatherforecast/
-Accept: application/json
+{
+    "token": "",
+    "refreshToken": "",
+}
+### Refresh request B
 
-###
+POST https://localhost:7092/api/Authentication/refresh-token
+Content-Type: application/json
+
+{
+    "token": "",
+    "refreshToken": "",
+}

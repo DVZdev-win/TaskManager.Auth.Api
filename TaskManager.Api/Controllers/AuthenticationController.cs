@@ -102,6 +102,8 @@ namespace TaskManager.Api.Controllers
             {
                 var tokenValue = await GenerateJwtTokenAsync(user);
 
+                await _context.SaveChangesAsync();
+
                 return Ok(tokenValue);
             }
 
@@ -171,19 +173,48 @@ namespace TaskManager.Api.Controllers
                     "please re-authenticate");
 
                 //check 7 - refresh token revoked
-                if(dbRefreshToken.IsRevoked) throw new Exception("refresh token is revoked");
+                if(dbRefreshToken.IsRevoked)
+                {
+                    await RevokeAllUserRefreshTokenAsync(dbRefreshToken.UserId);
+
+                    throw new Exception("refresh token reuse detected. please log in again.");
+                }
+
 
                 // generate new token
                 var dbUserData = await _userManager.FindByIdAsync(dbRefreshToken.UserId);
 
                 if(dbUserData == null) throw new Exception("User does not exist.");
 
-                dbRefreshToken.IsRevoked = true;
-                await _context.SaveChangesAsync();
+                await using var transaction = await _context.Database.BeginTransactionAsync();
 
-                var newTokenResponse = GenerateJwtTokenAsync(dbUserData);
+                try
+                {
+                    var rowsUpdated = await _context.RefreshTokens.Where(t => t.Id == dbRefreshToken.Id && !t.IsRevoked)
+                                                                  .ExecuteUpdateAsync(setters => setters
+                                                                  .SetProperty(t => t.IsRevoked, true));
+                    if (rowsUpdated == 0)
+                    {
+                        await transaction.RollbackAsync();
 
-                return await newTokenResponse;
+                        await RevokeAllUserRefreshTokenAsync(dbRefreshToken.UserId);
+
+                        throw new Exception("refresh token reuse detected. please log in again.");
+                    }
+
+                    var newTokenResponse = await GenerateJwtTokenAsync(dbUserData);
+
+                    await _context.SaveChangesAsync();
+
+                    await transaction.CommitAsync();
+
+                    return newTokenResponse;
+                }
+                catch
+                {
+                    await transaction.RollbackAsync();
+                    throw;
+                }
             }
         }
 
@@ -211,7 +242,7 @@ namespace TaskManager.Api.Controllers
             var token = new JwtSecurityToken(
                 issuer: _configuration["JWT:Issuer"],
                 audience: _configuration["JWT:Audience"],
-                expires: DateTime.UtcNow.AddMinutes(5), 
+                expires: DateTime.UtcNow.AddMinutes(1), 
                 claims: authClaims,
                 signingCredentials: new SigningCredentials(authSigningKey, SecurityAlgorithms.HmacSha256)
                 );
@@ -232,7 +263,6 @@ namespace TaskManager.Api.Controllers
             };
 
             await _context.RefreshTokens.AddAsync(refreshToken);
-            await _context.SaveChangesAsync();
             
 
             var response = new AuthResultVM()
@@ -250,6 +280,13 @@ namespace TaskManager.Api.Controllers
             var hashBytes = SHA256.HashData(tokenBytes);
 
             return Convert.ToHexString(hashBytes);
+        }
+
+        private async Task RevokeAllUserRefreshTokenAsync(string userId)
+        {
+            await _context.RefreshTokens.Where(t => t.UserId == userId && !t.IsRevoked)
+                                        .ExecuteUpdateAsync(setters => setters
+                                        .SetProperty(t => t.IsRevoked, true));
         }
 
         private DateTime UnixTimeStampToDateTimeInUTC(long unixTimeStamp)
